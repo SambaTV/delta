@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+/*
 package org.apache.spark.sql.delta.storage
 
 import scala.collection.JavaConverters._
@@ -66,16 +67,16 @@ import com.amazonaws.regions.Regions
 
 class DynamoDBLogStore (
     sparkConf: SparkConf,
-    hadoopConf: Configuration) extends BaseExternalLogStore(sparkConf, hadoopConf)
+    hadoopConf: Configuration) extends KVLogStore(sparkConf, hadoopConf)
 {
   import DynamoDBLogStore._
 
-  private def logEntryToPutItemRequest(entry: LogEntry, overwrite: Boolean) = {
+  private def logEntryToPutItemRequest(entry: LogEntryMetadata, overwrite: Boolean) = {
   }
 
   override def putLogEntry(
-    logEntry: LogEntry,
-    overwrite: Boolean): Unit =
+                            logEntry: LogEntryMetadata,
+                            overwrite: Boolean): Unit =
   {
     val parentPath = logEntry.path.getParent()
     try {
@@ -92,7 +93,7 @@ class DynamoDBLogStore (
   }
 
   override def listLogEntriesFrom(
-    fs: FileSystem, parentPath: Path, from: Path): Iterator[LogEntry] =
+    fs: FileSystem, parentPath: Path, from: Path): Iterator[LogEntryMetadata] =
   {
     val filename = from.getName()
     logInfo(s"query parentPath = $parentPath AND filename >= $filename")
@@ -145,10 +146,10 @@ class DynamoDBLogStore (
 }
 
 object DynamoDBLogStore {
-  implicit def logEntryToWrapper(entry: LogEntry): LogEntryWrapper = LogEntryWrapper(entry)
+  implicit def logEntryToWrapper(entry: LogEntryMetadata): LogEntryWrapper = LogEntryWrapper(entry)
 }
 
-case class LogEntryWrapper(entry: LogEntry) {
+case class LogEntryWrapper(entry: LogEntryMetadata) {
   def asPutItemRequest(tableName: String, overwrite: Boolean): PutItemRequest = {
     val pr = new PutItemRequest(
       tableName,
@@ -170,3 +171,4 @@ case class LogEntryWrapper(entry: LogEntry) {
     } else pr
   }
 }
+*/
