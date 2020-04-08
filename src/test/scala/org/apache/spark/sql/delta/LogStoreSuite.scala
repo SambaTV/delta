@@ -25,8 +25,7 @@ import org.apache.spark.sql.delta.DeltaOperations.ManualUpdate
 import org.apache.spark.sql.delta.DeltaTestUtils.OptimisticTxnTestHelper
 import org.apache.spark.sql.delta.actions.AddFile
 import org.apache.spark.sql.delta.storage._
-import org.apache.hadoop.fs.{Path, RawLocalFileSystem}
-
+import org.apache.hadoop.fs.{FileStatus, Path, RawLocalFileSystem}
 import org.apache.spark.sql.QueryTest
 import org.apache.spark.sql.test.SharedSparkSession
 import org.apache.spark.util.Utils
@@ -256,6 +255,15 @@ class LocalLogStoreSuite extends LogStoreSuiteBase {
   protected def shouldUseRenameToWriteCheckpoint: Boolean = true
 }
 
+
+class MemoryLogStoreSuite extends LogStoreSuiteBase {
+  override val logStoreClassName: String = classOf[MemoryLogStore].getName
+}
+
+class S3LogStoreSuite extends LogStoreSuiteBase {
+  override val logStoreClassName: String = classOf[S3SingleDriverLogStore].getName
+}
+
 /** A fake file system to test whether session Hadoop configuration will be picked up. */
 class FakeFileSystem extends RawLocalFileSystem {
   override def getScheme: String = FakeFileSystem.scheme
@@ -301,4 +309,20 @@ class TrackingRenameFileSystem extends RawLocalFileSystem {
 
 object TrackingRenameFileSystem {
   @volatile var numOfRename = 0
+}
+
+/** A fake file system to test whether session Hadoop configuration will be picked up. */
+class FakeNonConsistentFileSystem extends RawLocalFileSystem {
+  override def getScheme: String = FakeFileSystem.scheme
+  override def getUri: URI = FakeFileSystem.uri
+
+  override def listStatus(f: Path): Array[FileStatus] = {
+    val now = System.currentTimeMillis - 500
+    super.listStatus(f).iterator.filter(file => file.getModificationTime < now).toArray
+  }
+}
+
+object FakeNonConsistentFileSystem {
+  val scheme = "fakeNonConsistent"
+  val uri = URI.create(s"$scheme:///")
 }
