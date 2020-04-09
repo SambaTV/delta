@@ -93,11 +93,11 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
   private def tryFixTransactionLog(fs: FileSystem, entry: LogEntryMetadata): LogEntryMetadata = {
     logDebug(s"Try to fix: ${entry.path}")
 
-    if (!exists(fs, entry.path)) {
+    if (!exists(fs, entry.path, includeCache = false)) {
       writeLogTransaction(fs, entry)
     }
     val completedEntry = entry.complete()
-    updateCache(completedEntry)
+    writeCache(completedEntry)
     completedEntry
   }
 
@@ -116,9 +116,12 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
    * @param resolvedPath path to check
    * @return Boolean true if file exists else false
    */
-  protected def exists(fs: FileSystem, resolvedPath: Path): Boolean = {
+  protected def exists(
+    fs: FileSystem,
+    resolvedPath: Path,
+    includeCache: Boolean = true): Boolean = {
     // Ignore the cache for the first file of a Delta log
-    listFrom(fs, resolvedPath)
+    listFrom(fs, resolvedPath, useCache = includeCache)
       .take(1)
       .exists(_.getPath.getName == resolvedPath.getName)
   }
@@ -142,7 +145,10 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
    * List files starting from `resolvedPath` (inclusive) in the same directory, which merges
    * the file system list and the db list
    */
-  protected def listFrom(fs: FileSystem, resolvedPath: Path): Iterator[FileStatus] = {
+  protected def listFrom(
+    fs: FileSystem,
+    resolvedPath: Path,
+    useCache: Boolean = true): Iterator[FileStatus] = {
     val parentPath = resolvedPath.getParent
     if (!fs.exists(parentPath)) {
       throw new FileNotFoundException(s"No such file or directory: $parentPath")
@@ -152,6 +158,10 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
       fs.listStatus(parentPath)
         .filter(path => !path.getPath.getName.endsWith(".temp"))
         .filter(path => path.getPath.getName >= resolvedPath.getName)
+
+    if (!useCache) {
+      return listedFromFs.iterator
+    }
 
     val listedFromDB = listFromCache(fs, resolvedPath)
       .toList
@@ -166,7 +176,6 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
     listedFromDB.iterator
       .map(entry => s"db item: ${entry.getPath}")
       .foreach(x => logDebug(x))
-
     // end debug
 
     mergeFileIterators(listedFromDB.iterator, listedFromFs.iterator)
@@ -208,9 +217,10 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
     val logEntryMetadata =
       LogEntryMetadata(resolvedPath, fileLength, Some(tempPath))
 
+
     try {
       if (overwrite) {
-        updateCache(logEntryMetadata)
+        writeCache(logEntryMetadata)
       } else {
         writeCacheExclusive(logEntryMetadata, fs)
       }
@@ -222,20 +232,13 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
     }
     try {
       writeLogTransaction(fs, logEntryMetadata)
-      updateCache(logEntryMetadata.complete())
-
-      //      if (isInitialVersion(resolvedPath)) {
-      //        val obsoleteFiles = writtenPathCache
-      //          .asMap()
-      //          .asScala
-      //          .keys
-      //          .filter(_.getParent == lockedPath.getParent())
-      //          .asJava
-      //
-      //        writtenPathCache.invalidateAll(obsoleteFiles)
-      //      }
-
-
+      writeCache(logEntryMetadata.complete())
+      if (isInitialVersion(resolvedPath)) {
+        cleanCache(
+          entry => entry.path.getParent == logEntryMetadata.path.getParent
+            && entry.path != logEntryMetadata.path
+        )
+      }
     } catch {
       case e: Throwable =>
         logWarning(s"${e.getClass.getName}: ignoring recoverable error: $e")
@@ -249,10 +252,21 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
    */
   protected def writeCacheExclusive(logEntry: LogEntryMetadata, fs: FileSystem): Unit
 
-  protected def updateCache(logEntry: LogEntryMetadata): Unit
+  protected def writeCache(logEntry: LogEntryMetadata): Unit
+
+  protected def cleanCache(p: LogEntryMetadata => Boolean)
 
   protected def listFromCache(fs: FileSystem, resolvedPath: Path): Iterator[LogEntryMetadata]
 }
+
+class CachedFileStatus(
+  length: Long,
+  isdir: Boolean,
+  block_replication: Int,
+  blocksize: Long,
+  modification_time: Long,
+  path: Path
+) extends FileStatus(length, isdir, block_replication, blocksize, modification_time, path)
 
 /**
  * The file metadata to be stored in the external db
@@ -271,7 +285,7 @@ case class LogEntryMetadata(path: Path,
   }
 
   def asFileStatus(fs: FileSystem): FileStatus = {
-    new FileStatus(
+    new CachedFileStatus(
       length,
       false,
       1,

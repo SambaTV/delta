@@ -18,6 +18,7 @@ package org.apache.spark.sql.delta
 
 import java.io.{File, IOException}
 import java.net.URI
+import java.nio.file.FileSystemException
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -258,6 +259,39 @@ class LocalLogStoreSuite extends LogStoreSuiteBase {
 
 class MemoryLogStoreSuite extends LogStoreSuiteBase {
   override val logStoreClassName: String = classOf[MemoryLogStore].getName
+
+  test("fix incomplete transaction test") {
+    withTempDir { tempDir =>
+      val path = new Path(new URI(s"fakeNonConsistent://${tempDir.toURI.getRawPath}"))
+
+      withSQLConf("fs.fakeNonConsistent.impl" -> classOf[FakeNonConsistentFileSystem].getName) {
+        val log = DeltaLog(spark, path)
+        assert(log.store.getClass.getName == logStoreClassName)
+
+        // rename temp file to destination should fail to test fix transactions
+        FakeNonConsistentFileSystem.disabledRename = true
+        val txn = log.startTransaction()
+        val file = AddFile("1", Map.empty, 1, 1, dataChange = true) :: Nil
+
+        assertThrows[java.nio.file.FileSystemException] {
+          txn.commit(file, ManualUpdate)
+        }
+
+        FakeNonConsistentFileSystem.disabledRename = false
+        assert(
+          createLogStore(spark).listFrom(path + "/00000000000000000000.json").count(_ => true) == 1
+        )
+        DeltaLog.clearCache()
+      }
+    }
+  }
+
+  test("listFrom exceptions") {
+    val store = createLogStore(spark)
+    assertThrows[java.io.FileNotFoundException] {
+      store.listFrom("/non-existing-path/with-parent")
+    }
+  }
 }
 
 class S3LogStoreSuite extends LogStoreSuiteBase {
@@ -267,6 +301,7 @@ class S3LogStoreSuite extends LogStoreSuiteBase {
 /** A fake file system to test whether session Hadoop configuration will be picked up. */
 class FakeFileSystem extends RawLocalFileSystem {
   override def getScheme: String = FakeFileSystem.scheme
+
   override def getUri: URI = FakeFileSystem.uri
 }
 
@@ -288,11 +323,14 @@ class FakeAbstractFileSystem(uri: URI, conf: org.apache.hadoop.conf.Configuratio
     false) {
 
   // Implementation copied from RawLocalFs
+
   import org.apache.hadoop.fs.local.LocalConfigKeys
   import org.apache.hadoop.fs._
 
   override def getUriDefaultPort(): Int = -1
+
   override def getServerDefaults(): FsServerDefaults = LocalConfigKeys.getServerDefaults
+
   override def isValidName(src: String): Boolean = true
 }
 
@@ -313,16 +351,27 @@ object TrackingRenameFileSystem {
 
 /** A fake file system to test whether session Hadoop configuration will be picked up. */
 class FakeNonConsistentFileSystem extends RawLocalFileSystem {
-  override def getScheme: String = FakeFileSystem.scheme
-  override def getUri: URI = FakeFileSystem.uri
+  override def getScheme: String = FakeNonConsistentFileSystem.scheme
+
+  override def getUri: URI = FakeNonConsistentFileSystem.uri
 
   override def listStatus(f: Path): Array[FileStatus] = {
-    val now = System.currentTimeMillis - 500
+    val now = System.currentTimeMillis - 10000
     super.listStatus(f).iterator.filter(file => file.getModificationTime < now).toArray
+  }
+
+  override def rename(src: Path, dst: Path): Boolean = {
+    if (FakeNonConsistentFileSystem.disabledRename) {
+      return false
+      //      throw new FileSystemException("Failed to rename")
+    }
+    super.rename(src, dst)
   }
 }
 
 object FakeNonConsistentFileSystem {
   val scheme = "fakeNonConsistent"
   val uri = URI.create(s"$scheme:///")
+
+  var disabledRename = false
 }
