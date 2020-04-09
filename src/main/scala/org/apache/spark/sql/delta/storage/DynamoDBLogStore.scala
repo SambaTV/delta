@@ -14,28 +14,20 @@
  * limitations under the License.
  */
 
-/*
+
 package org.apache.spark.sql.delta.storage
 
 import scala.collection.JavaConverters._
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient
-import com.amazonaws.services.dynamodbv2.model.{
-  AttributeValue,
-  PutItemRequest,
-  QueryRequest,
-  Condition,
-  ComparisonOperator,
-  ExpectedAttributeValue,
-  ConditionalCheckFailedException
-}
-import java.io.FileNotFoundException
+import com.amazonaws.services.dynamodbv2.model.{AttributeValue, ComparisonOperator, Condition, ConditionalCheckFailedException, ExpectedAttributeValue, PutItemRequest, QueryRequest}
+import java.util.NoSuchElementException
 
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{Path, FileSystem}
+import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.SparkConf
-
 import com.amazonaws.regions.Region
 import com.amazonaws.regions.Regions
+import org.apache.spark.sql.delta.storage
 
 
 /*
@@ -63,86 +55,96 @@ import com.amazonaws.regions.Regions
   - spark.delta.DynamoDBLogStore.region - AWS region (defaults to 'us-east-1')
 
 */
+class DynamoDBLogStore(
+  sparkConf: SparkConf,
+  hadoopConf: Configuration) extends ExternalLockBaseLogStore(sparkConf, hadoopConf) {
 
-
-class DynamoDBLogStore (
-    sparkConf: SparkConf,
-    hadoopConf: Configuration) extends KVLogStore(sparkConf, hadoopConf)
-{
   import DynamoDBLogStore._
 
-  private def logEntryToPutItemRequest(entry: LogEntryMetadata, overwrite: Boolean) = {
+  private val confPrefix = "spark.delta.DynamoDBLogStore."
+  private val tableName = sparkConf.get(s"${confPrefix}tableName", "delta_log")
+
+  private val client = {
+    val client = new AmazonDynamoDBClient()
+
+    val regionName = sparkConf.get(s"${confPrefix}region", "us-east-1")
+    if (regionName != "") {
+      client.setRegion(Region.getRegion(Regions.fromName(regionName)))
+    }
+
+    scala.util.control.Exception.ignoring(classOf[NoSuchElementException]) {
+      client.setEndpoint(sparkConf.get(s"${confPrefix}host"))
+    }
+
+    client
   }
 
-  override def putLogEntry(
-                            logEntry: LogEntryMetadata,
-                            overwrite: Boolean): Unit =
-  {
-    val parentPath = logEntry.path.getParent()
+  private def putLogEntryMetadata(
+    logEntry: LogEntryMetadata,
+    overwrite: Boolean): Unit = {
     try {
       logInfo(s"putItem $logEntry, overwrite: $overwrite")
       client.putItem(logEntry.asPutItemRequest(tableName, overwrite))
     } catch {
       case e: ConditionalCheckFailedException =>
         logError(e.toString)
-        throw new java.nio.file.FileAlreadyExistsException(logEntry.path.toString())
+        throw new java.nio.file.FileAlreadyExistsException(logEntry.path.toString)
       case e: Throwable =>
         logError(e.toString)
-        throw new java.nio.file.FileSystemException(logEntry.path.toString())
+        throw new java.nio.file.FileSystemException(logEntry.path.toString)
     }
   }
 
-  override def listLogEntriesFrom(
-    fs: FileSystem, parentPath: Path, from: Path): Iterator[LogEntryMetadata] =
-  {
-    val filename = from.getName()
+  override protected def cleanCache(p: LogEntryMetadata => Boolean): Unit = {}
+
+  override protected def writeCacheExclusive(logEntry: LogEntryMetadata, fs: FileSystem): Unit = {
+    putLogEntryMetadata(logEntry, overwrite = false)
+  }
+
+  override protected def writeCache(logEntry: LogEntryMetadata): Unit = {
+    putLogEntryMetadata(logEntry, overwrite = true)
+  }
+
+  override protected def listFromCache(
+    fs: FileSystem, resolvedPath: Path): Iterator[LogEntryMetadata] = {
+    val filename = resolvedPath.getName
+    val parentPath = resolvedPath.getParent
     logInfo(s"query parentPath = $parentPath AND filename >= $filename")
-    val result = client.query(
-      new QueryRequest(tableName)
-      .withConsistentRead(true)
-      .withKeyConditions(
-        Map(
-          "filename" -> new Condition()
-            .withComparisonOperator(ComparisonOperator.GE)
-            .withAttributeValueList(new AttributeValue(filename)),
-          "parentPath" -> new Condition()
-            .withComparisonOperator(ComparisonOperator.EQ)
-            .withAttributeValueList(new AttributeValue(parentPath.toString()))
-        ).asJava
+
+    val result = client
+      .query(
+        new QueryRequest(tableName)
+          .withConsistentRead(true)
+          .withKeyConditions(
+            Map(
+              "filename" -> new Condition()
+                .withComparisonOperator(ComparisonOperator.GE)
+                .withAttributeValueList(new AttributeValue(filename)),
+              "parentPath" -> new Condition()
+                .withComparisonOperator(ComparisonOperator.EQ)
+                .withAttributeValueList(new AttributeValue(parentPath.toString))
+            ).asJava
+          )
       )
-    ).getItems().asScala
-    result.iterator.map( item => {
-      logInfo(s"query result item: ${item.toString()}")
-      val parentPath = item.get("parentPath").getS()
-      val filename = item.get("filename").getS()
-      val tempPath = Option(item.get("tempPath").getS()).map(new Path(_))
-      val length = item.get("length").getN().toLong
-      val modificationTime = item.get("modificationTime").getN().toLong
-      val isComplete = Option(item.get("isComplete").getS()).map(_.toBoolean).getOrElse(false)
-      LogEntry(
+      .getItems
+      .asScala
+
+    result.iterator.map(item => {
+      logInfo(s"query result item: ${item.toString}")
+      val parentPath = item.get("parentPath").getS
+      val filename = item.get("filename").getS
+      val tempPath = Option(item.get("tempPath").getS).map(new Path(_))
+      val length = item.get("length").getN.toLong
+      val modificationTime = item.get("modificationTime").getN.toLong
+      storage.LogEntryMetadata(
         path = new Path(s"$parentPath/$filename"),
         tempPath = tempPath,
         length = length,
-        modificationTime = modificationTime,
-        isComplete = isComplete
+        modificationTime = modificationTime
       )
     })
+
   }
-
-  val tableNameConfKey = "spark.delta.DynamoDBLogStore.tableName"
-  val tableName = sparkConf.get(tableNameConfKey, "delta_log")
-
-  val regionConfKey = "spark.delta.DynamoDBLogStore.region"
-
-  val client = {
-    val client = new AmazonDynamoDBClient()
-    val region = sparkConf.get(regionConfKey, "")
-    if(region != "") {
-      client.setRegion(Region.getRegion(Regions.fromName(region)))
-    }
-    client
-  }
-
 }
 
 object DynamoDBLogStore {
@@ -154,16 +156,16 @@ case class LogEntryWrapper(entry: LogEntryMetadata) {
     val pr = new PutItemRequest(
       tableName,
       Map(
-        "parentPath" -> new AttributeValue(entry.path.getParent().toString()),
-        "filename" -> new AttributeValue(entry.path.getName()),
+        "parentPath" -> new AttributeValue(entry.path.getParent.toString),
+        "filename" -> new AttributeValue(entry.path.getName),
         "tempPath" -> (
           entry.tempPath
-          .map(path => new AttributeValue(path.toString))
-          .getOrElse(new AttributeValue().withN("0"))
-        ),
+            .map(path => new AttributeValue(path.toString))
+            .getOrElse(new AttributeValue().withN("0"))
+          ),
         "length" -> new AttributeValue().withN(entry.length.toString),
-        "modificationTime" -> new AttributeValue().withN(System.currentTimeMillis().toString()),
-        "isComplete" ->  new AttributeValue().withS(entry.isComplete.toString)
+        "modificationTime" -> new AttributeValue().withN(System.currentTimeMillis().toString),
+        "isComplete" -> new AttributeValue().withS(entry.isComplete.toString)
       ).asJava
     )
     if (!overwrite) {
@@ -171,4 +173,4 @@ case class LogEntryWrapper(entry: LogEntryMetadata) {
     } else pr
   }
 }
-*/
+

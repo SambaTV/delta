@@ -39,6 +39,16 @@ class MemoryLogStore(sparkConf: SparkConf, hadoopConf: Configuration)
     }
   }
 
+  override protected def cleanCache(p: LogEntryMetadata => Boolean) {
+    val keys = writtenPathCache
+      .asMap()
+      .asScala
+      .filter { case (_, entry) => p(entry) }
+      .keys
+      .asJava
+
+    writtenPathCache.invalidateAll(keys)
+  }
 
   override def invalidateCache(): Unit = {
     writtenPathCache.invalidateAll()
@@ -60,7 +70,7 @@ class MemoryLogStore(sparkConf: SparkConf, hadoopConf: Configuration)
       }
   }
 
-  override protected def updateCache(
+  override protected def writeCache(
     logEntry: LogEntryMetadata
   ): Unit = {
     writtenPathCache.put(logEntry.path, logEntry)
