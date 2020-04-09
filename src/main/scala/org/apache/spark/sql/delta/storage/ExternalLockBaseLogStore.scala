@@ -32,10 +32,15 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
   extends HadoopFileSystemLogStore(sparkConf, hadoopConf)
     with DeltaLogging {
 
-  protected def resolved(path: Path): (FileSystem, Path) = {
-    val fs = path.getFileSystem(getHadoopConfiguration)
-    val resolvedPath = stripUserInfo(fs.makeQualified(path))
-    (fs, resolvedPath)
+  /**
+   * Delete file from filesystem.
+   * @param fs reference to [[FileSystem]]
+   * @param path path to delete
+   * @return Boolean true if delete is successful else false
+   */
+  private def deleteFile(fs: FileSystem, path: Path): Boolean = {
+    logDebug(s"delete file: $path")
+    fs.delete(path, false)
   }
 
   /**
@@ -45,11 +50,28 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
     FileNames.isDeltaFile(path) && FileNames.deltaVersion(path) == 0L
   }
 
-  protected def getPathKey(resolvedPath: Path): Path = {
-    stripUserInfo(resolvedPath)
+  /**
+   * Merge two iterators of [[FileStatus]] into a single iterator ordered by file path name.
+   * In case both iterators have [[FileStatus]]s for the same file path, keep the one from
+   * `iterWithPrecedence` and discard that from `iter`.
+   */
+  private def mergeFileIterators(
+    iter: Iterator[FileStatus],
+    iterWithPrecedence: Iterator[FileStatus]
+  ): Iterator[FileStatus] = {
+    val result = (iter.map(f => (f.getPath, f)).toMap
+      ++ iterWithPrecedence.map(f => (f.getPath, f))).values.toSeq
+      .sortBy(_.getPath.getName)
+    result.iterator
   }
 
-  protected def stripUserInfo(path: Path): Path = {
+  private def resolved(path: Path): (FileSystem, Path) = {
+    val fs = path.getFileSystem(getHadoopConfiguration)
+    val resolvedPath = stripUserInfo(fs.makeQualified(path))
+    (fs, resolvedPath)
+  }
+
+  private def stripUserInfo(path: Path): Path = {
     val uri = path.toUri
     val newUri = new URI(
       uri.getScheme,
@@ -64,71 +86,10 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
   }
 
   /**
-   * Merge two iterators of [[FileStatus]] into a single iterator ordered by file path name.
-   * In case both iterators have [[FileStatus]]s for the same file path, keep the one from
-   * `iterWithPrecedence` and discard that from `iter`.
+   * Method for assuring consistency on filesystem according to the external cache.
+   * Method try to rewrite TransactionLog from temporary path if it not exists.
+   * Method returns completed [[LogEntryMetadata]]
    */
-  protected def mergeFileIterators(
-    iter: Iterator[FileStatus],
-    iterWithPrecedence: Iterator[FileStatus]
-  ): Iterator[FileStatus] = {
-    val result = (iter.map(f => (f.getPath, f)).toMap
-      ++ iterWithPrecedence.map(f => (f.getPath, f))).values.toSeq
-      .sortBy(_.getPath.getName)
-    result.iterator
-  }
-
-  protected def writeActions(fs: FileSystem,
-    path: Path,
-    actions: Iterator[String]): Long = {
-    logDebug(s"writeActions to: $path")
-    val stream = new CountingOutputStream(fs.create(path, true))
-    actions.map(_ + "\n").map(_.getBytes(UTF_8)).foreach(stream.write)
-    stream.close()
-    stream.getCount
-  }
-
-  /**
-   * List files starting from `resolvedPath` (inclusive) in the same directory.
-   */
-  override def listFrom(path: Path): Iterator[FileStatus] = {
-    logDebug(s"listFrom path: ${path}")
-    val (fs, resolvedPath) = resolved(path)
-    listFrom(fs, resolvedPath)
-  }
-
-  /**
-   * List files starting from `resolvedPath` (inclusive) in the same directory, which merges
-   * the file system list and the db list
-   */
-  def listFrom(fs: FileSystem, resolvedPath: Path): Iterator[FileStatus] = {
-    val parentPath = resolvedPath.getParent
-    if (!fs.exists(parentPath)) {
-      throw new FileNotFoundException(s"No such file or directory: $parentPath")
-    }
-
-    val listedFromFs =
-      fs.listStatus(parentPath)
-        .filter(path => !path.getPath.getName.endsWith(".temp"))
-        .filter(path => path.getPath.getName >= resolvedPath.getName)
-    //        .filter(_ => scala.util.Random.nextFloat() > 0.25)
-
-    val listedFromDB = listFromCache(fs, resolvedPath)
-      .toList
-      .map(entry => if (!entry.isComplete) tryFixTransactionLog(fs, entry) else entry)
-      .map(entry => entry.asFileStatus(fs))
-
-    listedFromFs.iterator
-      .map(entry => s"fs item: ${entry.getPath}")
-      .foreach(x => logDebug(x))
-
-    listedFromDB.iterator
-      .map(entry => s"db item: ${entry.getPath}")
-      .foreach(x => logDebug(x))
-
-    mergeFileIterators(listedFromDB.iterator, listedFromFs.iterator)
-  }
-
   private def tryFixTransactionLog(fs: FileSystem, entry: LogEntryMetadata): LogEntryMetadata = {
     logDebug(s"Try to fix: ${entry.path}")
 
@@ -140,29 +101,98 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
     completedEntry
   }
 
-  protected def defGetTemporaryPath(path: Path): Path = {
-    val uuid = java.util.UUID.randomUUID().toString
-    new Path(s"${path.getParent}/${path.getName}.$uuid.temp")
-  }
-
-  protected def deleteFile(fs: FileSystem, path: Path): Boolean = {
-    logDebug(s"delete file: $path")
-    fs.delete(path, false)
-  }
-
-  private def exists(fs: FileSystem, resolvedPath: Path): Boolean = {
-    // Ignore the cache for the first file of a Delta log
-    listFrom(fs, resolvedPath)
-      .take(1)
-      .exists(_.getPath.getName == resolvedPath.getName)
-  }
-
   private def writeLogTransaction(fs: FileSystem, entryMetadata: LogEntryMetadata) {
     if (!fs.rename(entryMetadata.tempPath.get, entryMetadata.path)) {
       throw new FileSystemException(
         s"Cannot rename file from ${entryMetadata.tempPath.get} to ${entryMetadata.path}"
       )
     }
+  }
+
+
+  /**
+   * Check path exists on filesystem or in cache
+   * @param fs reference to [[FileSystem]]
+   * @param resolvedPath path to check
+   * @return Boolean true if file exists else false
+   */
+  protected def exists(fs: FileSystem, resolvedPath: Path): Boolean = {
+    // Ignore the cache for the first file of a Delta log
+    listFrom(fs, resolvedPath)
+      .take(1)
+      .exists(_.getPath.getName == resolvedPath.getName)
+  }
+
+  /**
+   * Returns path stripped user info.
+   */
+  protected def getPathKey(resolvedPath: Path): Path = {
+    stripUserInfo(resolvedPath)
+  }
+
+  /**
+   * Generate temporary path for TransactionLog.
+   */
+  protected def defGetTemporaryPath(path: Path): Path = {
+    val uuid = java.util.UUID.randomUUID().toString
+    new Path(s"${path.getParent}/${path.getName}.$uuid.temp")
+  }
+
+  /**
+   * List files starting from `resolvedPath` (inclusive) in the same directory, which merges
+   * the file system list and the db list
+   */
+  protected def listFrom(fs: FileSystem, resolvedPath: Path): Iterator[FileStatus] = {
+    val parentPath = resolvedPath.getParent
+    if (!fs.exists(parentPath)) {
+      throw new FileNotFoundException(s"No such file or directory: $parentPath")
+    }
+
+    val listedFromFs =
+      fs.listStatus(parentPath)
+        .filter(path => !path.getPath.getName.endsWith(".temp"))
+        .filter(path => path.getPath.getName >= resolvedPath.getName)
+
+    val listedFromDB = listFromCache(fs, resolvedPath)
+      .toList
+      .map(entry => if (!entry.isComplete) tryFixTransactionLog(fs, entry) else entry)
+      .map(entry => entry.asFileStatus(fs))
+
+    // for debug
+    listedFromFs.iterator
+      .map(entry => s"fs item: ${entry.getPath}")
+      .foreach(x => logDebug(x))
+
+    listedFromDB.iterator
+      .map(entry => s"db item: ${entry.getPath}")
+      .foreach(x => logDebug(x))
+
+    // end debug
+
+    mergeFileIterators(listedFromDB.iterator, listedFromFs.iterator)
+  }
+
+  /**
+   * Write file with actions under a specific path.
+   */
+  protected def writeActions(fs: FileSystem,
+    path: Path,
+    actions: Iterator[String]): Long = {
+    logDebug(s"writeActions to: $path")
+    val stream = new CountingOutputStream(fs.create(path, true))
+    actions.map(_ + "\n").map(_.getBytes(UTF_8)).foreach(stream.write)
+    stream.close()
+    stream.getCount
+  }
+
+
+  /**
+   * List files starting from `resolvedPath` (inclusive) in the same directory.
+   */
+  override def listFrom(path: Path): Iterator[FileStatus] = {
+    logDebug(s"listFrom path: ${path}")
+    val (fs, resolvedPath) = resolved(path)
+    listFrom(fs, resolvedPath)
   }
 
   override def write(path: Path,
@@ -182,7 +212,7 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
       if (overwrite) {
         updateCache(logEntryMetadata)
       } else {
-        writeCacheExclusive(logEntryMetadata)
+        writeCacheExclusive(logEntryMetadata, fs)
       }
     } catch {
       case e: Throwable =>
@@ -217,7 +247,7 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
    * Method should throw @java.nio.file.FileAlreadyExistsException if path exists in cache.
    *
    */
-  protected def writeCacheExclusive(logEntry: LogEntryMetadata): Unit
+  protected def writeCacheExclusive(logEntry: LogEntryMetadata, fs: FileSystem): Unit
 
   protected def updateCache(logEntry: LogEntryMetadata): Unit
 
