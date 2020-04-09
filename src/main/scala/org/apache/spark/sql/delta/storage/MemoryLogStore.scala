@@ -24,41 +24,24 @@ import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.spark.SparkConf
 
 import collection.JavaConverters._
+import scala.util.control.Breaks._
+
 
 class MemoryLogStore(sparkConf: SparkConf, hadoopConf: Configuration)
   extends ExternalLockBaseLogStore(sparkConf, hadoopConf) {
 
   import MemoryLogStore._
 
-  override protected def writeCacheExclusive(
-    logEntry: LogEntryMetadata
-  ): Unit = {
-
-    logDebug(s"WriteExternalCache: ${logEntry.path}")
-
-    val lock = pathLock.putIfAbsent(logEntry.path, new Object)
-    if (lock != null || writtenPathCache.getIfPresent(logEntry.path) != null) {
-      throw new java.nio.file.FileAlreadyExistsException(
-        s"LogEntry exinsts in cache ${logEntry.path}"
-      )
-    }
-
-    writtenPathCache.put(logEntry.path, logEntry)
-    val unlock = pathLock.remove(logEntry.path)
+  private def releaseLock(logEntryMetadata: LogEntryMetadata) {
+    val unlock = pathLock.remove(logEntryMetadata.path)
     unlock.synchronized {
       unlock.notifyAll()
     }
   }
 
-  override protected def updateCache(
-    logEntry: LogEntryMetadata
-  ): Unit = {
-    writtenPathCache.put(logEntry.path, logEntry)
 
-    //    val lock = pathLock.remove(logEntry.path)
-    //    lock.synchronized {
-    //      lock.notifyAll()
-    //    }
+  override def invalidateCache(): Unit = {
+    writtenPathCache.invalidateAll()
   }
 
   override protected def listFromCache(
@@ -77,9 +60,42 @@ class MemoryLogStore(sparkConf: SparkConf, hadoopConf: Configuration)
       }
   }
 
-  override def invalidateCache(): Unit = {
-    writtenPathCache.invalidateAll()
+  override protected def updateCache(
+    logEntry: LogEntryMetadata
+  ): Unit = {
+    writtenPathCache.put(logEntry.path, logEntry)
   }
+
+  override protected def writeCacheExclusive(
+    logEntry: LogEntryMetadata,
+    fs: FileSystem
+  ): Unit = {
+
+    logDebug(s"WriteExternalCache: ${logEntry.path}")
+
+    breakable {
+      while (true) {
+        val lock = pathLock.putIfAbsent(logEntry.path, new Object)
+        if (lock == null) break
+        lock.synchronized {
+          while (pathLock.get(logEntry.path) == lock) {
+            lock.wait()
+          }
+        }
+      }
+    }
+
+    if (exists(fs, logEntry.path)) {
+      releaseLock(logEntry)
+      throw new java.nio.file.FileAlreadyExistsException(
+        s"TransactionLog exists ${logEntry.path}"
+      )
+    }
+
+    writtenPathCache.put(logEntry.path, logEntry)
+    releaseLock(logEntry)
+  }
+
 }
 
 object MemoryLogStore {
