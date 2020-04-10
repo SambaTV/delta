@@ -13,12 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.spark.sql.delta
 
 import java.io.{File, IOException}
 import java.net.URI
-import java.nio.file.FileSystemException
 
 import scala.collection.mutable.ArrayBuffer
 
@@ -301,7 +299,6 @@ class S3LogStoreSuite extends LogStoreSuiteBase {
 /** A fake file system to test whether session Hadoop configuration will be picked up. */
 class FakeFileSystem extends RawLocalFileSystem {
   override def getScheme: String = FakeFileSystem.scheme
-
   override def getUri: URI = FakeFileSystem.uri
 }
 
@@ -323,14 +320,11 @@ class FakeAbstractFileSystem(uri: URI, conf: org.apache.hadoop.conf.Configuratio
     false) {
 
   // Implementation copied from RawLocalFs
-
   import org.apache.hadoop.fs.local.LocalConfigKeys
   import org.apache.hadoop.fs._
 
   override def getUriDefaultPort(): Int = -1
-
   override def getServerDefaults(): FsServerDefaults = LocalConfigKeys.getServerDefaults
-
   override def isValidName(src: String): Boolean = true
 }
 
@@ -349,29 +343,32 @@ object TrackingRenameFileSystem {
   @volatile var numOfRename = 0
 }
 
-/** A fake file system to test whether session Hadoop configuration will be picked up. */
+/**
+ * A fake file system to test whether session Hadoop configuration will be picked up.
+ * Filesystem is inconsistent, files there are in a listing after 1 second.
+ * It is possible to disable the rename method by parameter.
+ */
 class FakeNonConsistentFileSystem extends RawLocalFileSystem {
   override def getScheme: String = FakeNonConsistentFileSystem.scheme
 
   override def getUri: URI = FakeNonConsistentFileSystem.uri
 
   override def listStatus(f: Path): Array[FileStatus] = {
-    val now = System.currentTimeMillis - 10000
+    val now = System.currentTimeMillis - 1000
     super.listStatus(f).iterator.filter(file => file.getModificationTime < now).toArray
   }
 
   override def rename(src: Path, dst: Path): Boolean = {
     if (FakeNonConsistentFileSystem.disabledRename) {
       return false
-      //      throw new FileSystemException("Failed to rename")
     }
     super.rename(src, dst)
   }
 }
 
 object FakeNonConsistentFileSystem {
-  val scheme = "fakeNonConsistent"
-  val uri = URI.create(s"$scheme:///")
+  private val uri: URI = URI.create(s"$scheme:///")
+  private val scheme = "fakeNonConsistent"
 
   var disabledRename = false
 }
