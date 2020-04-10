@@ -28,7 +28,7 @@ import scala.util.control.Breaks._
 
 
 class MemoryLogStore(sparkConf: SparkConf, hadoopConf: Configuration)
-  extends ExternalLockBaseLogStore(sparkConf, hadoopConf) {
+  extends BaseExternalLogStore(sparkConf, hadoopConf) {
 
   import MemoryLogStore._
 
@@ -71,18 +71,23 @@ class MemoryLogStore(sparkConf: SparkConf, hadoopConf: Configuration)
   }
 
   override protected def writeCache(
-    logEntry: LogEntryMetadata
-  ): Unit = {
+    fs: FileSystem,
+    logEntry: LogEntryMetadata,
+    overwrite: Boolean = false): Unit = {
+
+    logDebug(s"WriteExternalCache: ${logEntry.path} (overwrite=$overwrite)")
+
+    if (!overwrite) {
+      writeCacheExclusive(fs, logEntry)
+      return
+    }
     writtenPathCache.put(logEntry.path, logEntry)
   }
 
-  override protected def writeCacheExclusive(
-    logEntry: LogEntryMetadata,
-    fs: FileSystem
+  protected def writeCacheExclusive(
+    fs: FileSystem,
+    logEntry: LogEntryMetadata
   ): Unit = {
-
-    logDebug(s"WriteExternalCache: ${logEntry.path}")
-
     breakable {
       while (true) {
         val lock = pathLock.putIfAbsent(logEntry.path, new Object)

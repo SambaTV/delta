@@ -14,12 +14,19 @@
  * limitations under the License.
  */
 
-
 package org.apache.spark.sql.delta.storage
 
 import scala.collection.JavaConverters._
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient
-import com.amazonaws.services.dynamodbv2.model.{AttributeValue, ComparisonOperator, Condition, ConditionalCheckFailedException, ExpectedAttributeValue, PutItemRequest, QueryRequest}
+import com.amazonaws.services.dynamodbv2.model.{
+  AttributeValue,
+  ComparisonOperator,
+  Condition,
+  ConditionalCheckFailedException,
+  ExpectedAttributeValue,
+  PutItemRequest,
+  QueryRequest
+}
 import java.util.NoSuchElementException
 
 import org.apache.hadoop.conf.Configuration
@@ -57,7 +64,7 @@ import org.apache.spark.sql.delta.storage
 */
 class DynamoDBLogStore(
   sparkConf: SparkConf,
-  hadoopConf: Configuration) extends ExternalLockBaseLogStore(sparkConf, hadoopConf) {
+  hadoopConf: Configuration) extends BaseExternalLogStore(sparkConf, hadoopConf) {
 
   import DynamoDBLogStore._
 
@@ -79,7 +86,10 @@ class DynamoDBLogStore(
     client
   }
 
-  private def putLogEntryMetadata(
+  override protected def cleanCache(p: LogEntryMetadata => Boolean): Unit = {}
+
+  override protected def writeCache(
+    fs: FileSystem,
     logEntry: LogEntryMetadata,
     overwrite: Boolean): Unit = {
     try {
@@ -93,16 +103,6 @@ class DynamoDBLogStore(
         logError(e.toString)
         throw new java.nio.file.FileSystemException(logEntry.path.toString)
     }
-  }
-
-  override protected def cleanCache(p: LogEntryMetadata => Boolean): Unit = {}
-
-  override protected def writeCacheExclusive(logEntry: LogEntryMetadata, fs: FileSystem): Unit = {
-    putLogEntryMetadata(logEntry, overwrite = false)
-  }
-
-  override protected def writeCache(logEntry: LogEntryMetadata): Unit = {
-    putLogEntryMetadata(logEntry, overwrite = true)
   }
 
   override protected def listFromCache(
