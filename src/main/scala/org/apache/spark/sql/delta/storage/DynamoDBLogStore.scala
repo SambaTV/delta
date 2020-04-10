@@ -18,6 +18,7 @@ package org.apache.spark.sql.delta.storage
 
 import scala.collection.JavaConverters._
 import com.amazonaws.services.dynamodbv2.AmazonDynamoDBClient
+import com.amazonaws.auth.BasicAWSCredentials
 import com.amazonaws.services.dynamodbv2.model.{
   AttributeValue,
   ComparisonOperator,
@@ -59,7 +60,9 @@ import org.apache.spark.sql.delta.storage
 
   Following spark properties are recognized:
   - spark.delta.DynamoDBLogStore.tableName - table name (defaults to 'delta_log')
+  - spark.delta.DynamoDBLogStore.endpoint - endpoint (defaults to 'Amazon AWS')
   - spark.delta.DynamoDBLogStore.region - AWS region (defaults to 'us-east-1')
+  - spark.delta.DynamoDBLogStore.fakeAuth - use for dynamodb-local (defaults to 'false')
 
 */
 class DynamoDBLogStore(
@@ -68,23 +71,9 @@ class DynamoDBLogStore(
 
   import DynamoDBLogStore._
 
-  private val confPrefix = "spark.delta.DynamoDBLogStore."
   private val tableName = sparkConf.get(s"${confPrefix}tableName", "delta_log")
 
-  private val client = {
-    val client = new AmazonDynamoDBClient()
-
-    val regionName = sparkConf.get(s"${confPrefix}region", "us-east-1")
-    if (regionName != "") {
-      client.setRegion(Region.getRegion(Regions.fromName(regionName)))
-    }
-
-    scala.util.control.Exception.ignoring(classOf[NoSuchElementException]) {
-      client.setEndpoint(sparkConf.get(s"${confPrefix}host"))
-    }
-
-    client
-  }
+  private val client: AmazonDynamoDBClient = DynamoDBLogStore.getClient(sparkConf)
 
   override protected def cleanCache(p: LogEntryMetadata => Boolean): Unit = {}
 
@@ -143,12 +132,33 @@ class DynamoDBLogStore(
         modificationTime = modificationTime
       )
     })
-
   }
 }
 
 object DynamoDBLogStore {
+  private val confPrefix = "spark.delta.DynamoDBLogStore."
+
   implicit def logEntryToWrapper(entry: LogEntryMetadata): LogEntryWrapper = LogEntryWrapper(entry)
+
+  def getClient(sparkConf: SparkConf): AmazonDynamoDBClient = {
+
+    var client = new AmazonDynamoDBClient()
+    if (sparkConf.get(s"${confPrefix}fakeAuth", "false") == "true") {
+      val auth = new BasicAWSCredentials("fakeMyKeyId", "fakeSecretAccessKey")
+      client = new AmazonDynamoDBClient(auth)
+    }
+
+    val regionName = sparkConf.get(s"${confPrefix}region", "us-east-1")
+    if (regionName != "") {
+      client.setRegion(Region.getRegion(Regions.fromName(regionName)))
+    }
+
+    scala.util.control.Exception.ignoring(classOf[NoSuchElementException]) {
+      client.setEndpoint(sparkConf.get(s"${confPrefix}host"))
+    }
+
+    client
+  }
 }
 
 case class LogEntryWrapper(entry: LogEntryMetadata) {

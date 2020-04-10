@@ -19,11 +19,15 @@ import java.io.{File, IOException}
 import java.net.URI
 
 import scala.collection.mutable.ArrayBuffer
+import scala.collection.JavaConverters._
 
+import com.amazonaws.services.dynamodbv2.model.{AttributeDefinition, CreateTableRequest, KeySchemaElement, ProvisionedThroughput}
+import com.dimafeng.testcontainers.{ForAllTestContainer, GenericContainer}
 import org.apache.spark.sql.delta.DeltaOperations.ManualUpdate
 import org.apache.spark.sql.delta.actions.AddFile
 import org.apache.spark.sql.delta.storage._
 import org.apache.hadoop.fs.{FileStatus, Path, RawLocalFileSystem}
+import org.apache.spark.SparkConf
 import org.apache.spark.sql.QueryTest
 import org.apache.spark.sql.test.SharedSparkSession
 import org.apache.spark.util.Utils
@@ -254,9 +258,7 @@ class LocalLogStoreSuite extends LogStoreSuiteBase {
 }
 
 
-class MemoryLogStoreSuite extends LogStoreSuiteBase {
-  override val logStoreClassName: String = classOf[MemoryLogStore].getName
-
+abstract class BaseExternalLogStoreSuite extends LogStoreSuiteBase {
   test("fix incomplete transaction test") {
     withTempDir { tempDir =>
       val path = new Path(new URI(s"fakeNonConsistent://${tempDir.toURI.getRawPath}"))
@@ -294,6 +296,51 @@ class MemoryLogStoreSuite extends LogStoreSuiteBase {
 class S3LogStoreSuite extends LogStoreSuiteBase {
   override val logStoreClassName: String = classOf[S3SingleDriverLogStore].getName
 }
+
+class MemoryLogStore extends BaseExternalLogStoreSuite {
+  override val logStoreClassName: String = classOf[MemoryLogStore].getName
+}
+
+class DynamoDBLogStoreSuite extends BaseExternalLogStoreSuite with ForAllTestContainer {
+  private val dynamoTableName = "delta_log"
+
+  override def logStoreClassName: String = classOf[DynamoDBLogStore].getName
+
+  override val container: GenericContainer = GenericContainer(
+    "amazon/dynamodb-local",
+    exposedPorts = Seq(8000)
+  )
+
+  protected override def sparkConf: SparkConf = {
+    super.sparkConf
+      .set("spark.delta.DynamoDBLogStore.tableName", dynamoTableName)
+      .set("spark.delta.DynamoDBLogStore.host", s"http://localhost:${container.mappedPort(8000)}")
+      .set("spark.delta.DynamoDBLogStore.fakeAuth", "true")
+  }
+
+  protected override def beforeAll(): Unit = {
+    super.beforeAll()
+
+    val client = DynamoDBLogStore.getClient(sparkConf)
+
+    client.createTable(
+      new CreateTableRequest(
+        List(
+          new AttributeDefinition("parentPath", "S"),
+          new AttributeDefinition("filename", "S")
+        ).asJava,
+        dynamoTableName,
+        List(
+          new KeySchemaElement("parentPath", "HASH"),
+          new KeySchemaElement("filename", "RANGE")
+        ).asJava,
+        new ProvisionedThroughput(5L, 5L)
+      )
+    )
+
+  }
+}
+
 
 /** A fake file system to test whether session Hadoop configuration will be picked up. */
 class FakeFileSystem extends RawLocalFileSystem {
@@ -366,8 +413,8 @@ class FakeNonConsistentFileSystem extends RawLocalFileSystem {
 }
 
 object FakeNonConsistentFileSystem {
-  private val uri: URI = URI.create(s"$scheme:///")
   private val scheme = "fakeNonConsistent"
+  private val uri: URI = URI.create(s"$scheme:///")
 
   var disabledRename = false
 }
