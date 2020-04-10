@@ -28,7 +28,7 @@ import org.apache.spark.SparkConf
 import org.apache.spark.sql.delta.metering.DeltaLogging
 import org.apache.spark.sql.delta.util.FileNames
 
-abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Configuration)
+abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configuration)
   extends HadoopFileSystemLogStore(sparkConf, hadoopConf)
     with DeltaLogging {
 
@@ -97,7 +97,7 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
       writeLogTransaction(fs, entry)
     }
     val completedEntry = entry.complete()
-    writeCache(completedEntry)
+    writeCache(fs, completedEntry, overwrite = true)
     completedEntry
   }
 
@@ -136,7 +136,7 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
   /**
    * Generate temporary path for TransactionLog.
    */
-  protected def defGetTemporaryPath(path: Path): Path = {
+  protected def getTemporaryPath(path: Path): Path = {
     val uuid = java.util.UUID.randomUUID().toString
     new Path(s"${path.getParent}/${path.getName}.$uuid.temp")
   }
@@ -211,19 +211,14 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
 
     logDebug(s"write path: ${path}, ${overwrite}")
 
-    val tempPath = defGetTemporaryPath(resolvedPath)
+    val tempPath = getTemporaryPath(resolvedPath)
     val fileLength = writeActions(fs, tempPath, actions)
 
     val logEntryMetadata =
       LogEntryMetadata(resolvedPath, fileLength, Some(tempPath))
 
-
     try {
-      if (overwrite) {
-        writeCache(logEntryMetadata)
-      } else {
-        writeCacheExclusive(logEntryMetadata, fs)
-      }
+      writeCache(fs, logEntryMetadata, overwrite)
     } catch {
       case e: Throwable =>
         logError(s"${e.getClass.getName}: $e")
@@ -232,7 +227,7 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
     }
     try {
       writeLogTransaction(fs, logEntryMetadata)
-      writeCache(logEntryMetadata.complete())
+      writeCache(fs, logEntryMetadata.complete(), overwrite = true)
       if (isInitialVersion(resolvedPath)) {
         cleanCache(
           entry => entry.path.getParent == logEntryMetadata.path.getParent
@@ -248,11 +243,11 @@ abstract class ExternalLockBaseLogStore(sparkConf: SparkConf, hadoopConf: Config
   /*
    * Write cache in exclusive way.
    * Method should throw @java.nio.file.FileAlreadyExistsException if path exists in cache.
-   *
    */
-  protected def writeCacheExclusive(logEntry: LogEntryMetadata, fs: FileSystem): Unit
-
-  protected def writeCache(logEntry: LogEntryMetadata): Unit
+  protected def writeCache(
+    fs: FileSystem,
+    logEntry: LogEntryMetadata,
+    overwrite: Boolean = false): Unit
 
   protected def cleanCache(p: LogEntryMetadata => Boolean)
 
