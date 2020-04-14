@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 Databricks, Inc.
+ * Copyright (2020) The Delta Lake Project Authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -252,6 +252,8 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
   protected def cleanCache(p: LogEntryMetadata => Boolean)
 
   protected def listFromCache(fs: FileSystem, resolvedPath: Path): Iterator[LogEntryMetadata]
+
+  override def isPartialWriteVisible(path: Path): Boolean = false
 }
 
 class CachedFileStatus(

@@ -301,16 +301,20 @@ abstract class BaseExternalLogStoreSuite extends LogStoreSuiteBase {
 
 class S3LogStoreSuite extends LogStoreSuiteBase {
   override val logStoreClassName: String = classOf[S3SingleDriverLogStore].getName
+
+  protected def shouldUseRenameToWriteCheckpoint: Boolean = false
 }
 
 class MemoryLogStoreSuite extends BaseExternalLogStoreSuite {
   override val logStoreClassName: String = classOf[MemoryLogStore].getName
+  protected def shouldUseRenameToWriteCheckpoint: Boolean = true
 }
 
 class DynamoDBLogStoreSuite extends BaseExternalLogStoreSuite with ForAllTestContainer {
   private val dynamoTableName = "delta_log"
 
   override def logStoreClassName: String = classOf[DynamoDBLogStore].getName
+  protected def shouldUseRenameToWriteCheckpoint: Boolean = true
 
   override val container: GenericContainer = GenericContainer(
     "amazon/dynamodb-local",
