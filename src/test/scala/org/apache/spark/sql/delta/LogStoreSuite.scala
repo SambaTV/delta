@@ -19,7 +19,12 @@ import java.io.{File, IOException}
 import java.net.URI
 
 import scala.collection.JavaConverters._
-import com.amazonaws.services.dynamodbv2.model.{AttributeDefinition, CreateTableRequest, KeySchemaElement, ProvisionedThroughput}
+import com.amazonaws.services.dynamodbv2.model.{
+  AttributeDefinition,
+  CreateTableRequest,
+  KeySchemaElement,
+  ProvisionedThroughput
+}
 import com.dimafeng.testcontainers.{ForAllTestContainer, GenericContainer}
 import org.apache.spark.sql.delta.DeltaOperations.ManualUpdate
 import org.apache.spark.sql.delta.actions.AddFile
@@ -215,7 +220,7 @@ class S3LogStoreSuite extends LogStoreSuiteBase {
   override val logStoreClassName: String = classOf[S3SingleDriverLogStore].getName
 }
 
-class MemoryLogStore extends BaseExternalLogStoreSuite {
+class MemoryLogStoreSuite extends BaseExternalLogStoreSuite {
   override val logStoreClassName: String = classOf[MemoryLogStore].getName
 }
 
