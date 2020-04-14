@@ -20,13 +20,7 @@ import java.net.URI
 
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.JavaConverters._
-
-import com.amazonaws.services.dynamodbv2.model.{
-  AttributeDefinition,
-  CreateTableRequest,
-  KeySchemaElement,
-  ProvisionedThroughput
-}
+import com.amazonaws.services.dynamodbv2.model.{AttributeDefinition, CreateTableRequest, KeySchemaElement, ProvisionedThroughput}
 import com.dimafeng.testcontainers.{ForAllTestContainer, GenericContainer}
 import org.apache.spark.sql.delta.DeltaOperations.ManualUpdate
 import org.apache.spark.sql.delta.DeltaTestUtils.OptimisticTxnTestHelper
@@ -37,6 +31,7 @@ import org.apache.spark.SparkConf
 import org.apache.spark.sql.QueryTest
 import org.apache.spark.sql.test.SharedSparkSession
 import org.apache.spark.util.Utils
+import org.scalatest.Ignore
 
 abstract class LogStoreSuiteBase extends QueryTest
   with LogStoreProvider
@@ -310,6 +305,7 @@ class MemoryLogStoreSuite extends BaseExternalLogStoreSuite {
   protected def shouldUseRenameToWriteCheckpoint: Boolean = true
 }
 
+@Ignore
 class DynamoDBLogStoreSuite extends BaseExternalLogStoreSuite with ForAllTestContainer {
   private val dynamoTableName = "delta_log"
 
