@@ -261,22 +261,62 @@ class LocalLogStoreSuite extends LogStoreSuiteBase {
 abstract class BaseExternalLogStoreSuite extends LogStoreSuiteBase {
   test("fix incomplete transaction test") {
     withTempDir { tempDir =>
-      val path = new Path(new URI(s"fakeNonConsistent://${tempDir.toURI.getRawPath}"))
+      val path = new Path(s"fakeNonConsistent://${tempDir.toURI.getRawPath}")
 
-      withSQLConf("fs.fakeNonConsistent.impl" -> classOf[FakeNonConsistentFileSystem].getName) {
+      withSQLConf(
+        "fs.fakeNonConsistent.impl" -> classOf[FakeNonConsistentFileSystem].getName,
+        "fs.AbstractFileSystem.fakeNonConsistent.impl" ->
+          classOf[FakeNonConsistentAbstractFileSystem].getName
+      ) {
         val log = DeltaLog(spark, path)
         assert(log.store.getClass.getName == logStoreClassName)
 
         // rename temp file to destination should fail to test fix transactions
-        FakeNonConsistentFileSystem.disabledRename = true
+        FakeNonConsistentFileSystem.disabledRenameOnce = true
         val txn = log.startTransaction()
         val file = AddFile("1", Map.empty, 1, 1, dataChange = true) :: Nil
+        txn.commit(file, ManualUpdate)
+        log.checkpoint()
 
-        assertThrows[java.nio.file.FileSystemException] {
-          txn.commit(file, ManualUpdate)
-        }
+        val secondFile = AddFile("2", Map.empty, 1, 1, dataChange = true) :: Nil
+        val secondTxn = log.startTransaction()
+        secondTxn.commit(secondFile, ManualUpdate)
 
-        FakeNonConsistentFileSystem.disabledRename = false
+        log.checkpoint()
+
+        assert(
+          createLogStore(spark).listFrom(path + "/00000000000000000000.json").count(_ => true) == 1
+        )
+        DeltaLog.clearCache()
+      }
+    }
+  }
+
+  test("Check renaming checkpoints") {
+    withTempDir { tempDir =>
+      val path = new Path(s"fakeNonConsistent://${tempDir.toURI.getRawPath}")
+
+      withSQLConf(
+        "fs.fakeNonConsistent.impl" -> classOf[FakeNonConsistentFileSystem].getName,
+        "fs.AbstractFileSystem.fakeNonConsistent.impl" ->
+          classOf[FakeNonConsistentAbstractFileSystem].getName
+      ) {
+        val log = DeltaLog(spark, path)
+        assert(log.store.getClass.getName == logStoreClassName)
+
+        // rename temp file to destination should fail to test fix transactions
+        FakeNonConsistentFileSystem.disabledRenameOnce = true
+        val txn = log.startTransaction()
+        val file = AddFile("1", Map.empty, 1, 1, dataChange = true) :: Nil
+        txn.commit(file, ManualUpdate)
+        log.checkpoint()
+
+        val secondFile = AddFile("2", Map.empty, 1, 1, dataChange = true) :: Nil
+        val secondTxn = log.startTransaction()
+        secondTxn.commit(secondFile, ManualUpdate)
+
+        log.checkpoint()
+
         assert(
           createLogStore(spark).listFrom(path + "/00000000000000000000.json").count(_ => true) == 1
         )
@@ -301,7 +341,7 @@ class S3LogStoreSuite extends LogStoreSuiteBase {
 
 class MemoryLogStoreSuite extends BaseExternalLogStoreSuite {
   override val logStoreClassName: String = classOf[MemoryLogStore].getName
-  protected def shouldUseRenameToWriteCheckpoint: Boolean = true
+  protected def shouldUseRenameToWriteCheckpoint: Boolean = false
 }
 
 @Ignore
@@ -413,13 +453,36 @@ class FakeNonConsistentFileSystem extends RawLocalFileSystem {
     if (FakeNonConsistentFileSystem.disabledRename) {
       return false
     }
+    if (FakeNonConsistentFileSystem.disabledRenameOnce) {
+      FakeNonConsistentFileSystem.disabledRenameOnce = false
+      return false
+    }
     super.rename(src, dst)
   }
 }
 
 object FakeNonConsistentFileSystem {
-  private val scheme = "fakeNonConsistent"
+  val scheme = "fakeNonConsistent"
   private val uri: URI = URI.create(s"$scheme:///")
 
   var disabledRename = false
+  var disabledRenameOnce = false
+}
+
+
+class FakeNonConsistentAbstractFileSystem(uri: URI, conf: org.apache.hadoop.conf.Configuration)
+  extends org.apache.hadoop.fs.DelegateToFileSystem(
+    uri,
+    new FakeNonConsistentFileSystem,
+    conf,
+    FakeNonConsistentFileSystem.scheme,
+    false) {
+
+  // Implementation copied from RawLocalFs
+  import org.apache.hadoop.fs.local.LocalConfigKeys
+  import org.apache.hadoop.fs._
+
+  override def getUriDefaultPort(): Int = -1
+  override def getServerDefaults(): FsServerDefaults = LocalConfigKeys.getServerDefaults
+  override def isValidName(src: String): Boolean = true
 }

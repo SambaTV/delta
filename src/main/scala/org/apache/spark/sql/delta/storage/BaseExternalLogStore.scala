@@ -20,10 +20,13 @@ import java.io.FileNotFoundException
 import java.net.URI
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.FileSystemException
+import java.util
 
 import com.google.common.io.CountingOutputStream
 import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.Options.Rename
 import org.apache.hadoop.fs._
+import org.apache.hadoop.security.AccessControlException
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.delta.metering.DeltaLogging
 import org.apache.spark.sql.delta.util.FileNames
@@ -90,21 +93,48 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
    * Method try to rewrite TransactionLog from temporary path if it not exists.
    * Method returns completed [[LogEntryMetadata]]
    */
-
-   private def tryFixTransactionLog(fs: FileSystem, entry: LogEntryMetadata): LogEntryMetadata = {
+  private def tryFixTransactionLog(fs: FileSystem, entry: LogEntryMetadata): LogEntryMetadata = {
     logDebug(s"Try to fix: ${entry.path}")
-    val tempPath = entry.tempPath.get
     try {
-      writeActions(fs, entry.path, read(tempPath).iterator)
-      val completedEntry = entry.complete()
-      writeCache(fs, completedEntry, overwrite = true)
-      deleteFile(fs, tempPath)
-      completedEntry
+      writeLogTransaction(fs, entry)
     } catch {
-      case e: FileNotFoundException =>
-        logWarning(s"ignoring $e while fixing (already done?)")
-        entry
+      case _: FileSystemException => print("Failed to fix transaction, ignore...")
     }
+    val completedEntry = entry.complete()
+    writeCache(fs, completedEntry, overwrite = true)
+    completedEntry
+  }
+
+  private def writeLogTransaction(fs: FileSystem, entryMetadata: LogEntryMetadata) {
+    val fc = FileContext.getFileContext(entryMetadata.tempPath.get.toUri, getHadoopConfiguration)
+//    val fc = FileContext.getFileContext(getHadoopConfiguration)
+    try {
+      fc.rename(entryMetadata.tempPath.get, entryMetadata.path, Options.Rename.OVERWRITE)
+//      fs.rename(entryMetadata.tempPath.get, entryMetadata.path)
+    } catch {
+      case e: Exception => throw new FileSystemException(
+        s"Cannot rename file from ${entryMetadata.tempPath.get} to ${entryMetadata.path}",
+        "",
+        e.getMessage
+      )
+    }
+  }
+
+
+  /**
+   * Check path exists on filesystem or in cache
+   * @param fs reference to [[FileSystem]]
+   * @param resolvedPath path to check
+   * @return Boolean true if file exists else false
+   */
+  protected def exists(
+    fs: FileSystem,
+    resolvedPath: Path,
+    includeCache: Boolean = true): Boolean = {
+    // Ignore the cache for the first file of a Delta log
+    listFrom(fs, resolvedPath, useCache = includeCache)
+      .take(1)
+      .exists(_.getPath.getName == resolvedPath.getName)
   }
 
   /**
@@ -169,7 +199,11 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
     path: Path,
     actions: Iterator[String]): Long = {
     logDebug(s"writeActions to: $path")
+//    val fc = FileContext.getFileContext(getHadoopConfiguration)
     val stream = new CountingOutputStream(fs.create(path, true))
+//    val stream = new CountingOutputStream(
+//      fc.create(path, util.EnumSet.of(CreateFlag.OVERWRITE, CreateFlag.CREATE))
+//    )
     actions.map(_ + "\n").map(_.getBytes(UTF_8)).foreach(stream.write)
     stream.close()
     stream.getCount
@@ -193,8 +227,7 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
     logDebug(s"write path: ${path}, ${overwrite}")
 
     val tempPath = getTemporaryPath(resolvedPath)
-    val actionsSeq = actions.toSeq
-    val fileLength = writeActions(fs, tempPath, actionsSeq.iterator)
+    val fileLength = writeActions(fs, tempPath, actions)
 
     val logEntryMetadata =
       LogEntryMetadata(resolvedPath, fileLength, Some(tempPath))
@@ -208,9 +241,14 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
         throw e
     }
     try {
-      writeActions(fs, resolvedPath, actionsSeq.iterator)
+      writeLogTransaction(fs, logEntryMetadata)
       writeCache(fs, logEntryMetadata.complete(), overwrite = true)
-      deleteFile(fs, tempPath)
+      if (isInitialVersion(resolvedPath)) {
+        cleanCache(
+          entry => entry.path.getParent == logEntryMetadata.path.getParent
+            && entry.path != logEntryMetadata.path
+        )
+      }
     } catch {
       case e: Throwable =>
         logWarning(s"${e.getClass.getName}: ignoring recoverable error: $e")
