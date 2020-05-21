@@ -17,20 +17,25 @@ package org.apache.spark.sql.delta
 
 import java.io.{File, IOException}
 import java.net.URI
+import java.util.concurrent.{ConcurrentHashMap, TimeUnit}
 
 import scala.collection.mutable.ArrayBuffer
 import scala.collection.JavaConverters._
+import scala.util.control.Breaks._
 import com.amazonaws.services.dynamodbv2.model.{AttributeDefinition, CreateTableRequest, KeySchemaElement, ProvisionedThroughput}
 import com.dimafeng.testcontainers.{ForAllTestContainer, GenericContainer}
+import com.google.common.cache.CacheBuilder
+import org.apache.hadoop.conf.Configuration
 import org.apache.spark.sql.delta.DeltaOperations.ManualUpdate
 import org.apache.spark.sql.delta.actions.AddFile
 import org.apache.spark.sql.delta.storage._
-import org.apache.hadoop.fs.{FileStatus, Path, RawLocalFileSystem}
+import org.apache.hadoop.fs.{FileStatus, FileSystem, Path, RawLocalFileSystem}
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.QueryTest
 import org.apache.spark.sql.test.SharedSparkSession
 import org.apache.spark.util.Utils
 import org.scalatest.Ignore
+
 
 abstract class LogStoreSuiteBase extends QueryTest
   with LogStoreProvider
@@ -485,4 +490,109 @@ class FakeNonConsistentAbstractFileSystem(uri: URI, conf: org.apache.hadoop.conf
   override def getUriDefaultPort(): Int = -1
   override def getServerDefaults(): FsServerDefaults = LocalConfigKeys.getServerDefaults
   override def isValidName(src: String): Boolean = true
+}
+
+class MemoryLogStore(sparkConf: SparkConf, hadoopConf: Configuration)
+  extends BaseExternalLogStore(sparkConf, hadoopConf) {
+
+  import MemoryLogStore._
+
+  private def releaseLock(logEntryMetadata: LogEntryMetadata) {
+    val unlock = pathLock.remove(logEntryMetadata.path)
+    unlock.synchronized {
+      unlock.notifyAll()
+    }
+  }
+
+  override protected def cleanCache(p: LogEntryMetadata => Boolean) {
+    val keys = writtenPathCache
+      .asMap()
+      .asScala
+      .filter { case (_, entry) => p(entry) }
+      .keys
+      .asJava
+
+    writtenPathCache.invalidateAll(keys)
+  }
+
+  override def invalidateCache(): Unit = {
+    writtenPathCache.invalidateAll()
+  }
+
+  override protected def listFromCache(
+                                        fs: FileSystem,
+                                        resolvedPath: Path): Iterator[LogEntryMetadata] = {
+    val pathKey = getPathKey(resolvedPath)
+    writtenPathCache
+      .asMap()
+      .asScala
+      .iterator
+      .filter { case (path, _) =>
+        path.getParent == pathKey.getParent() && path.getName >= pathKey.getName
+      }
+      .map {
+        case (_, logEntry) => logEntry
+      }
+  }
+
+  override protected def writeCache(
+                                     fs: FileSystem,
+                                     logEntry: LogEntryMetadata,
+                                     overwrite: Boolean = false): Unit = {
+
+    logDebug(s"WriteExternalCache: ${logEntry.path} (overwrite=$overwrite)")
+
+    if (!overwrite) {
+      writeCacheExclusive(fs, logEntry)
+      return
+    }
+    writtenPathCache.put(logEntry.path, logEntry)
+  }
+
+  protected def writeCacheExclusive(
+                                     fs: FileSystem,
+                                     logEntry: LogEntryMetadata
+                                   ): Unit = {
+    breakable {
+      while (true) {
+        val lock = pathLock.putIfAbsent(logEntry.path, new Object)
+        if (lock == null) break
+        lock.synchronized {
+          while (pathLock.get(logEntry.path) == lock) {
+            lock.wait()
+          }
+        }
+      }
+    }
+
+    if (exists(fs, logEntry.path)) {
+      releaseLock(logEntry)
+      throw new java.nio.file.FileAlreadyExistsException(
+        s"TransactionLog exists ${logEntry.path}"
+      )
+    }
+
+    writtenPathCache.put(logEntry.path, logEntry)
+    releaseLock(logEntry)
+  }
+
+}
+
+object MemoryLogStore {
+  /**
+   * A global path lock to ensure that no concurrent writers writing to the same path in the same
+   * JVM.
+   */
+  private val pathLock = new ConcurrentHashMap[Path, AnyRef]()
+
+  /**
+   * A global cache that records the metadata of the files recently written.
+   * As list-after-write may be inconsistent on S3, we can use the files in the cache
+   * to fix the inconsistent file listing.
+   */
+  private val writtenPathCache =
+    CacheBuilder
+      .newBuilder()
+      .expireAfterAccess(120, TimeUnit.MINUTES)
+      .build[Path, LogEntryMetadata]()
 }
