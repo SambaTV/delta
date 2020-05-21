@@ -344,8 +344,8 @@ class S3LogStoreSuite extends LogStoreSuiteBase {
   protected def shouldUseRenameToWriteCheckpoint: Boolean = false
 }
 
-class MemoryLogStoreSuite extends BaseExternalLogStoreSuite {
-  override val logStoreClassName: String = classOf[MemoryLogStore].getName
+class TestMemoryLogStoreSuite extends BaseExternalLogStoreSuite {
+  override val logStoreClassName: String = classOf[TestMemoryLogStore].getName
   protected def shouldUseRenameToWriteCheckpoint: Boolean = false
 }
 
@@ -492,10 +492,10 @@ class FakeNonConsistentAbstractFileSystem(uri: URI, conf: org.apache.hadoop.conf
   override def isValidName(src: String): Boolean = true
 }
 
-class MemoryLogStore(sparkConf: SparkConf, hadoopConf: Configuration)
+class TestMemoryLogStore(sparkConf: SparkConf, hadoopConf: Configuration)
   extends BaseExternalLogStore(sparkConf, hadoopConf) {
 
-  import MemoryLogStore._
+  import TestMemoryLogStore._
 
   private def releaseLock(logEntryMetadata: LogEntryMetadata) {
     val unlock = pathLock.remove(logEntryMetadata.path)
@@ -578,7 +578,7 @@ class MemoryLogStore(sparkConf: SparkConf, hadoopConf: Configuration)
 
 }
 
-object MemoryLogStore {
+object TestMemoryLogStore {
   /**
    * A global path lock to ensure that no concurrent writers writing to the same path in the same
    * JVM.
