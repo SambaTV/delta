@@ -20,13 +20,10 @@ import java.io.FileNotFoundException
 import java.net.URI
 import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.FileSystemException
-import java.util
 
 import com.google.common.io.CountingOutputStream
 import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.Options.Rename
 import org.apache.hadoop.fs._
-import org.apache.hadoop.security.AccessControlException
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.delta.metering.DeltaLogging
 import org.apache.spark.sql.delta.util.FileNames
@@ -204,11 +201,7 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
     path: Path,
     actions: Iterator[String]): Long = {
     logDebug(s"writeActions to: $path")
-//    val fc = FileContext.getFileContext(getHadoopConfiguration)
     val stream = new CountingOutputStream(fs.create(path, true))
-//    val stream = new CountingOutputStream(
-//      fc.create(path, util.EnumSet.of(CreateFlag.OVERWRITE, CreateFlag.CREATE))
-//    )
     actions.map(_ + "\n").map(_.getBytes(UTF_8)).foreach(stream.write)
     stream.close()
     stream.getCount
