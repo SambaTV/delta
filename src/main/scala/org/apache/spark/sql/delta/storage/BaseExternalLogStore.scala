@@ -106,11 +106,16 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
   }
 
   private def writeLogTransaction(fs: FileSystem, entryMetadata: LogEntryMetadata) {
-    val fc = FileContext.getFileContext(entryMetadata.tempPath.get.toUri, getHadoopConfiguration)
-//    val fc = FileContext.getFileContext(getHadoopConfiguration)
     try {
-      fc.rename(entryMetadata.tempPath.get, entryMetadata.path, Options.Rename.OVERWRITE)
-//      fs.rename(entryMetadata.tempPath.get, entryMetadata.path)
+      FileUtil.copy(
+        entryMetadata.tempPath.get.getFileSystem(getHadoopConfiguration),
+        entryMetadata.tempPath.get,
+        entryMetadata.path.getFileSystem(getHadoopConfiguration),
+        entryMetadata.path,
+        true,
+        true,
+        getHadoopConfiguration
+      )
     } catch {
       case e: Exception => throw new FileSystemException(
         s"Cannot rename file from ${entryMetadata.tempPath.get} to ${entryMetadata.path}",

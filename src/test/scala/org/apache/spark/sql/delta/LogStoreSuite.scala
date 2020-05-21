@@ -290,40 +290,7 @@ abstract class BaseExternalLogStoreSuite extends LogStoreSuiteBase {
         log.checkpoint()
 
         assert(
-          createLogStore(spark).listFrom(path + "/00000000000000000000.json").count(_ => true) == 1
-        )
-        DeltaLog.clearCache()
-      }
-    }
-  }
-
-  test("Check renaming checkpoints") {
-    withTempDir { tempDir =>
-      val path = new Path(s"fakeNonConsistent://${tempDir.toURI.getRawPath}")
-
-      withSQLConf(
-        "fs.fakeNonConsistent.impl" -> classOf[FakeNonConsistentFileSystem].getName,
-        "fs.AbstractFileSystem.fakeNonConsistent.impl" ->
-          classOf[FakeNonConsistentAbstractFileSystem].getName
-      ) {
-        val log = DeltaLog(spark, path)
-        assert(log.store.getClass.getName == logStoreClassName)
-
-        // rename temp file to destination should fail to test fix transactions
-        FakeNonConsistentFileSystem.disabledRenameOnce = true
-        val txn = log.startTransaction()
-        val file = AddFile("1", Map.empty, 1, 1, dataChange = true) :: Nil
-        txn.commit(file, ManualUpdate)
-        log.checkpoint()
-
-        val secondFile = AddFile("2", Map.empty, 1, 1, dataChange = true) :: Nil
-        val secondTxn = log.startTransaction()
-        secondTxn.commit(secondFile, ManualUpdate)
-
-        log.checkpoint()
-
-        assert(
-          createLogStore(spark).listFrom(path + "/00000000000000000000.json").count(_ => true) == 1
+          createLogStore(spark).listFrom(path + "/00000000000000000000.json").count(_ => true) == 3
         )
         DeltaLog.clearCache()
       }
