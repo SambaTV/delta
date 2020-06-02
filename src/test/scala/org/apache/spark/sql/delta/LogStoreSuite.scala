@@ -280,7 +280,11 @@ abstract class BaseExternalLogStoreSuite extends LogStoreSuiteBase {
         FakeNonConsistentFileSystem.disabledRenameOnce = true
         val txn = log.startTransaction()
         val file = AddFile("1", Map.empty, 1, 1, dataChange = true) :: Nil
-        txn.commit(file, ManualUpdate)
+        try {
+          txn.commit(file, ManualUpdate)
+        } catch {
+          case e: Throwable => print(e)
+        }
         log.checkpoint()
 
         val secondFile = AddFile("2", Map.empty, 1, 1, dataChange = true) :: Nil
