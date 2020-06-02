@@ -468,6 +468,22 @@ class TestMemoryLogStore(sparkConf: SparkConf, hadoopConf: Configuration)
 
   import TestMemoryLogStore._
 
+  /**
+   * Check path exists on filesystem or in cache
+   * @param fs reference to [[FileSystem]]
+   * @param resolvedPath path to check
+   * @return Boolean true if file exists else false
+   */
+  protected def exists(
+    fs: FileSystem,
+    resolvedPath: Path,
+    includeCache: Boolean = true): Boolean = {
+    // Ignore the cache for the first file of a Delta log
+    listFrom(fs, resolvedPath, useCache = includeCache)
+      .take(1)
+      .exists(_.getPath.getName == resolvedPath.getName)
+  }
+
   private def releaseLock(logEntryMetadata: LogEntryMetadata) {
     val unlock = pathLock.remove(logEntryMetadata.path)
     unlock.synchronized {
