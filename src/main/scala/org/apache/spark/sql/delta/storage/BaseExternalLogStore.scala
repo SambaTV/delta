@@ -106,7 +106,7 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
   private def tryFixTransactionLog(fs: FileSystem, entry: LogEntryMetadata): LogEntryMetadata = {
     logDebug(s"Try to fix: ${entry.path}")
     try {
-      writeLogTransaction(fs, entry)
+      completeTransactionLog(fs, entry)
     } catch {
       case e: FileSystemException => print(
         s"Failed to fix transaction, ignore... ${e.getMessage}\n"
@@ -117,7 +117,7 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
     completedEntry
   }
 
-  private def writeLogTransaction(fs: FileSystem, entryMetadata: LogEntryMetadata) {
+  private def completeTransactionLog(fs: FileSystem, entryMetadata: LogEntryMetadata) {
     try {
       copyFile(fs, entryMetadata.tempPath.get, entryMetadata.path)
       writeCache(fs, entryMetadata.complete(), overwrite = true)
@@ -165,7 +165,8 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
       return listedFromFs.iterator
     }
 
-    val listedFromDB = listFromCache(fs, resolvedPath, false)
+    val listedFromDB = listFromCache(fs, resolvedPath, true)
+      .map(x => if (x.isComplete) x else tryFixTransactionLog(fs, x) )
         .map(x => x.asFileStatus(fs))
 
     // for debug
@@ -225,7 +226,7 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
         throw e
     }
     try {
-      writeLogTransaction(fs, logEntryMetadata)
+      completeTransactionLog(fs, logEntryMetadata)
       if (isInitialVersion(resolvedPath)) {
         cleanCache(
           entry => entry.path.getParent == logEntryMetadata.path.getParent
