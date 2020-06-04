@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets.UTF_8
 import java.nio.file.FileSystemException
 
 import com.google.common.io.CountingOutputStream
+import org.apache.commons.io.IOUtils
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.fs._
 import org.apache.spark.SparkConf
@@ -41,6 +42,18 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
   private def deleteFile(fs: FileSystem, path: Path): Boolean = {
     logDebug(s"delete file: $path")
     fs.delete(path, false)
+  }
+
+  private def copyFile(fs: FileSystem, src: Path, dst: Path) {
+    logDebug(s"copy file: $src -> $dst")
+    val input_stream = fs.open(src)
+    val output_stream = fs.create(dst, true)
+    try {
+      IOUtils.copy(input_stream, output_stream)
+    } finally {
+      output_stream.close()
+      input_stream.close()
+    }
   }
 
   /**
@@ -92,39 +105,28 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
    */
   private def tryFixTransactionLog(fs: FileSystem, entry: LogEntryMetadata): LogEntryMetadata = {
     logDebug(s"Try to fix: ${entry.path}")
-
-    if (!exists(fs, entry.path, includeCache = false)) {
-      writeLogTransaction(fs, entry)
+    try {
+      completeTransactionLog(fs, entry)
+    } catch {
+      case e: FileSystemException => print(
+        s"Failed to fix transaction, ignore... ${e.getMessage}\n"
+      )
     }
     val completedEntry = entry.complete()
     writeCache(fs, completedEntry, overwrite = true)
     completedEntry
   }
 
-  private def writeLogTransaction(fs: FileSystem, entryMetadata: LogEntryMetadata) {
-    if (!fs.rename(entryMetadata.tempPath.get, entryMetadata.path)) {
-      throw new FileSystemException(
-        s"Cannot rename file from ${entryMetadata.tempPath.get} to ${entryMetadata.path}"
-      )
+  private def completeTransactionLog(fs: FileSystem, entryMetadata: LogEntryMetadata) {
+    try {
+      copyFile(fs, entryMetadata.tempPath.get, entryMetadata.path)
+      writeCache(fs, entryMetadata.complete(), overwrite = true)
+    } catch {
+      case e: FileNotFoundException =>
+        logWarning(s"ignoring $e while fixing (already done?)")
     }
   }
 
-
-  /**
-   * Check path exists on filesystem or in cache
-   * @param fs reference to [[FileSystem]]
-   * @param resolvedPath path to check
-   * @return Boolean true if file exists else false
-   */
-  protected def exists(
-    fs: FileSystem,
-    resolvedPath: Path,
-    includeCache: Boolean = true): Boolean = {
-    // Ignore the cache for the first file of a Delta log
-    listFrom(fs, resolvedPath, useCache = includeCache)
-      .take(1)
-      .exists(_.getPath.getName == resolvedPath.getName)
-  }
 
   /**
    * Returns path stripped user info.
@@ -138,7 +140,7 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
    */
   protected def getTemporaryPath(path: Path): Path = {
     val uuid = java.util.UUID.randomUUID().toString
-    new Path(s"${path.getParent}/${path.getName}.$uuid.temp")
+    new Path(s"${path.getParent}/.${path.getName}.$uuid.temp")
   }
 
   /**
@@ -163,10 +165,9 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
       return listedFromFs.iterator
     }
 
-    val listedFromDB = listFromCache(fs, resolvedPath)
-      .toList
-      .map(entry => if (!entry.isComplete) tryFixTransactionLog(fs, entry) else entry)
-      .map(entry => entry.asFileStatus(fs))
+    val listedFromDB = listFromCache(fs, resolvedPath, true)
+      .map(x => if (x.isComplete) x else tryFixTransactionLog(fs, x) )
+        .map(x => x.asFileStatus(fs))
 
     // for debug
     listedFromFs.iterator
@@ -214,8 +215,7 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
     val tempPath = getTemporaryPath(resolvedPath)
     val fileLength = writeActions(fs, tempPath, actions)
 
-    val logEntryMetadata =
-      LogEntryMetadata(resolvedPath, fileLength, Some(tempPath))
+    val logEntryMetadata = LogEntryMetadata(resolvedPath, fileLength, Some(tempPath))
 
     try {
       writeCache(fs, logEntryMetadata, overwrite)
@@ -226,8 +226,7 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
         throw e
     }
     try {
-      writeLogTransaction(fs, logEntryMetadata)
-      writeCache(fs, logEntryMetadata.complete(), overwrite = true)
+      completeTransactionLog(fs, logEntryMetadata)
       if (isInitialVersion(resolvedPath)) {
         cleanCache(
           entry => entry.path.getParent == logEntryMetadata.path.getParent
@@ -252,6 +251,20 @@ abstract class BaseExternalLogStore(sparkConf: SparkConf, hadoopConf: Configurat
   protected def cleanCache(p: LogEntryMetadata => Boolean)
 
   protected def listFromCache(fs: FileSystem, resolvedPath: Path): Iterator[LogEntryMetadata]
+
+  protected def listFromCache(
+    fs: FileSystem,
+    resolvedPath: Path,
+    withIncomplete: Boolean): List[LogEntryMetadata] = {
+    val listedFromDB = listFromCache(fs, resolvedPath)
+      .toList
+
+    if (withIncomplete) {
+      return listedFromDB
+    }
+    listedFromDB
+      .filter(x => x.isComplete)
+  }
 
   override def isPartialWriteVisible(path: Path): Boolean = false
 }
